@@ -12,7 +12,7 @@ type ApiItem = {
     ID: number;
     NewsTypeID: number;
     PublishTime: string;
-    URL: string; // e.g. "ua/...."
+    URL: string;
     Title: string;
     Descr?: string;
     CoverURL?: string;
@@ -35,6 +35,39 @@ const escapeHtml = (s: string) =>
         .replaceAll('"', '&quot;')
         .replaceAll("'", '&#039;');
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function fetchJsonWithRetry<T>(url: string, tries = 4): Promise<T> {
+    let lastErr: unknown;
+
+    for (let i = 0; i < tries; i++) {
+        try {
+            const resp = await got<T>({
+                method: 'get',
+                url,
+                headers: {
+                    accept: 'application/json',
+                    referer: 'https://news.finance.ua/',
+                    origin: 'https://news.finance.ua',
+                    'user-agent': 'RSSHub (+https://github.com/DIYgod/RSSHub)',
+                    'accept-language': 'uk-UA,uk;q=0.9,en-US;q=0.7,en;q=0.6',
+                },
+                // У різних форках RSSHub це поле може називатись по-різному,
+                // але зазвичай воно проходить у underlying клієнт.
+                timeout: 30000,
+            });
+
+            return resp.data;
+        } catch (e) {
+            lastErr = e;
+            // backoff: 400ms, 800ms, 1600ms...
+            await sleep(400 * 2 ** i);
+        }
+    }
+
+    throw lastErr;
+}
+
 export const route: Route = {
     path: '/all',
     categories: ['finance', 'news'],
@@ -44,7 +77,7 @@ export const route: Route = {
         type_id: 'type_id (у вас 2)',
         lang: 'ua/ru/en (у вас ua)',
         max: 'скільки елементів віддати (за замовчуванням 60)',
-        page_size: 'скільки брати за запит (за замовчуванням 30, щоб було менше запитів)',
+        page_size: 'скільки брати за один запит (за замовчуванням 30)',
     },
     name: 'Finance.ua News (API)',
     maintainers: ['oleksandrooo'],
@@ -54,48 +87,18 @@ export const route: Route = {
         const type_id = ctx.req.query('type_id') ?? '2';
         const lang = ctx.req.query('lang') ?? 'ua';
 
-        // Скільки елементів віддавати в RSS (не "всі назавжди", а останні N)
+        // RSS має сенс як "останні N"
         const max = Math.max(1, Math.min(300, Number(ctx.req.query('max') ?? 60)));
 
-        // Зменшуємо кількість HTTP-запитів: просимо більше за раз.
-        // Якщо API не дозволяє великі limit — зменшіть до 10/6.
+        // менше запитів = менше шансів таймаута у Vercel
         const pageSize = Math.max(1, Math.min(50, Number(ctx.req.query('page_size') ?? 30)));
 
         const baseApi = 'https://news-api.finance.ua/api/1.0/news/public/page-collection/all.class';
-
-        // Робимо got-інстанс з довшим таймаутом + ретраями
-        const client = got.extend({
-            headers: {
-                accept: 'application/json',
-                referer: 'https://news.finance.ua/',
-                origin: 'https://news.finance.ua',
-                'user-agent': 'RSSHub (+https://github.com/DIYgod/RSSHub)',
-                'accept-language': 'uk-UA,uk;q=0.9,en-US;q=0.7,en;q=0.6',
-            },
-            // важливо: у got для RSSHub найнадійніше задавати timeout як number (мс)
-            timeout: 30000, // 30s
-            retry: {
-                limit: 3,
-                methods: ['GET'],
-                statusCodes: [408, 413, 429, 500, 502, 503, 504],
-                errorCodes: [
-                    'ETIMEDOUT',
-                    'ECONNRESET',
-                    'EAI_AGAIN',
-                    'ECONNREFUSED',
-                    'ENOTFOUND',
-                    'ERR_SOCKET_TIMEOUT',
-                ],
-            },
-            // щоб не було “вічного” очікування
-            throwHttpErrors: true,
-        });
 
         let offset = 0;
         let more = true;
         let items: ApiItem[] = [];
 
-        // Пагінація: збираємо до max або поки more=false
         while (more && items.length < max) {
             const url =
                 `${baseApi}?limit=${pageSize}&offset=${offset}` +
@@ -103,21 +106,20 @@ export const route: Route = {
                 `&type_id=${encodeURIComponent(type_id)}` +
                 `&lang=${encodeURIComponent(lang)}`;
 
-            const resp = await client.get(url).json<ApiResp>();
+            const body = await fetchJsonWithRetry<ApiResp>(url, 4);
 
-            if (!resp?.status || !Array.isArray(resp.data)) {
+            if (!body?.status || !Array.isArray(body.data)) {
                 break;
             }
 
-            items = items.concat(resp.data);
-            more = Boolean(resp.more);
+            items = items.concat(body.data);
+            more = Boolean(body.more);
             offset += pageSize;
 
-            // запобіжник
             if (offset > 5000) break;
         }
 
-        // Дедуп за ID (про всяк випадок)
+        // дедуп по ID (на всяк випадок)
         const seen = new Set<number>();
         const deduped: ApiItem[] = [];
         for (const it of items) {
