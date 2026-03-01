@@ -52,15 +52,12 @@ async function fetchJsonWithRetry<T>(url: string, tries = 4): Promise<T> {
                     'user-agent': 'RSSHub (+https://github.com/DIYgod/RSSHub)',
                     'accept-language': 'uk-UA,uk;q=0.9,en-US;q=0.7,en;q=0.6',
                 },
-                // У різних форках RSSHub це поле може називатись по-різному,
-                // але зазвичай воно проходить у underlying клієнт.
                 timeout: 30000,
             });
 
             return resp.data;
         } catch (e) {
             lastErr = e;
-            // backoff: 400ms, 800ms, 1600ms...
             await sleep(400 * 2 ** i);
         }
     }
@@ -73,13 +70,13 @@ export const route: Route = {
     categories: ['finance', 'news'],
     example: '/financeua/all?option_id=18&type_id=2&lang=ua&max=60&page_size=30',
     parameters: {
-        option_id: 'option_id (у вас 18)',
-        type_id: 'type_id (у вас 2)',
-        lang: 'ua/ru/en (у вас ua)',
-        max: 'скільки елементів віддати (за замовчуванням 60)',
-        page_size: 'скільки брати за один запит (за замовчуванням 30)',
+        option_id: 'option_id (наприклад 18)',
+        type_id: 'type_id (наприклад 2)',
+        lang: 'ua/ru/en (наприклад ua)',
+        max: 'скільки елементів віддати (за замовчуванням 60, максимум 300)',
+        page_size: 'скільки брати за один запит (за замовчуванням 30, максимум 50)',
     },
-    name: 'Finance.ua News (API)',
+    name: 'Finance.ua News (API): All',
     maintainers: ['oleksandrooo'],
 
     handler: async (ctx) => {
@@ -87,10 +84,7 @@ export const route: Route = {
         const type_id = ctx.req.query('type_id') ?? '2';
         const lang = ctx.req.query('lang') ?? 'ua';
 
-        // RSS має сенс як "останні N"
         const max = Math.max(1, Math.min(300, Number(ctx.req.query('max') ?? 60)));
-
-        // менше запитів = менше шансів таймаута у Vercel
         const pageSize = Math.max(1, Math.min(50, Number(ctx.req.query('page_size') ?? 30)));
 
         const baseApi = 'https://news-api.finance.ua/api/1.0/news/public/page-collection/all.class';
@@ -116,10 +110,11 @@ export const route: Route = {
             more = Boolean(body.more);
             offset += pageSize;
 
+            // safety stop
             if (offset > 5000) break;
         }
 
-        // дедуп по ID (на всяк випадок)
+        // дедуп по ID
         const seen = new Set<number>();
         const deduped: ApiItem[] = [];
         for (const it of items) {
