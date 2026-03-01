@@ -68,23 +68,28 @@ async function fetchJsonWithRetry<T>(url: string, tries = 4): Promise<T> {
 export const route: Route = {
     path: '/all',
     categories: ['finance', 'news'],
-    example: '/financeua/all?option_id=18&type_id=2&lang=ua&max=60&page_size=30',
+    example: '/financeua/all?lang=ua&limit=20',
     parameters: {
-        option_id: 'option_id (наприклад 18)',
-        type_id: 'type_id (наприклад 2)',
-        lang: 'ua/ru/en (наприклад ua)',
-        max: 'скільки елементів віддати (за замовчуванням 60, максимум 300)',
+        option_id: 'опціонально: option_id (наприклад 18)',
+        type_id: 'опціонально: type_id (наприклад 2)',
+        lang: 'ua/ru/en (за замовчуванням ua)',
+        limit: 'скільки елементів віддати (alias до max, за замовчуванням 60, максимум 300)',
+        max: 'те саме, що limit',
         page_size: 'скільки брати за один запит (за замовчуванням 30, максимум 50)',
     },
     name: 'Finance.ua News (API): All',
     maintainers: ['oleksandrooo'],
 
     handler: async (ctx) => {
-        const option_id = ctx.req.query('option_id') ?? '18';
-        const type_id = ctx.req.query('type_id') ?? '2';
+        // ❗️ВАЖЛИВО: НЕ СТАВИМО ДЕФОЛТІВ ДЛЯ option_id/type_id
+        const option_id = ctx.req.query('option_id'); // string | null
+        const type_id = ctx.req.query('type_id'); // string | null
         const lang = ctx.req.query('lang') ?? 'ua';
 
-        const max = Math.max(1, Math.min(300, Number(ctx.req.query('max') ?? 60)));
+        // Підтримка limit (як ти використовуєш у URL) + старий max
+        const maxRaw = ctx.req.query('limit') ?? ctx.req.query('max') ?? '60';
+        const max = Math.max(1, Math.min(300, Number(maxRaw)));
+
         const pageSize = Math.max(1, Math.min(50, Number(ctx.req.query('page_size') ?? 30)));
 
         const baseApi = 'https://news-api.finance.ua/api/1.0/news/public/page-collection/all.class';
@@ -94,23 +99,25 @@ export const route: Route = {
         let items: ApiItem[] = [];
 
         while (more && items.length < max) {
-            const url =
-                `${baseApi}?limit=${pageSize}&offset=${offset}` +
-                `&option_id=${encodeURIComponent(option_id)}` +
-                `&type_id=${encodeURIComponent(type_id)}` +
-                `&lang=${encodeURIComponent(lang)}`;
+            const params = new URLSearchParams();
+            params.set('limit', String(pageSize));
+            params.set('offset', String(offset));
+            params.set('lang', lang);
+
+            // ✅ додаємо лише якщо реально передали
+            if (option_id) params.set('option_id', option_id);
+            if (type_id) params.set('type_id', type_id);
+
+            const url = `${baseApi}?${params.toString()}`;
 
             const body = await fetchJsonWithRetry<ApiResp>(url, 4);
 
-            if (!body?.status || !Array.isArray(body.data)) {
-                break;
-            }
+            if (!body?.status || !Array.isArray(body.data)) break;
 
             items = items.concat(body.data);
             more = Boolean(body.more);
             offset += pageSize;
 
-            // safety stop
             if (offset > 5000) break;
         }
 
@@ -127,12 +134,16 @@ export const route: Route = {
         const finalItems = deduped.slice(0, max);
 
         const site = 'https://news.finance.ua/';
-        const feedTitle = `Finance.ua (option_id=${option_id}, type_id=${type_id}, lang=${lang})`;
+        const feedTitleParts = [`Finance.ua (lang=${lang}`];
+        if (option_id) feedTitleParts.push(`option_id=${option_id}`);
+        if (type_id) feedTitleParts.push(`type_id=${type_id}`);
+        feedTitleParts.push(')');
+        const feedTitle = feedTitleParts.join(', ').replace(', )', ')');
 
         return {
             title: feedTitle,
             link: site,
-            description: `news-api.finance.ua → RSS (option_id=${option_id}, type_id=${type_id}, lang=${lang})`,
+            description: `news-api.finance.ua → RSS (${option_id ? `option_id=${option_id}, ` : ''}${type_id ? `type_id=${type_id}, ` : ''}lang=${lang})`,
             item: finalItems.map((it) => {
                 const link = site + it.URL.replace(/^\/+/, '');
 
